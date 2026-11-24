@@ -5,6 +5,7 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+*.iml
 *.swp
 
 # Env / secrets
@@ -14,6 +15,15 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Android / Gradle
+.gradle/
+build/
+local.properties
+.cxx/
+captures/
+*.apk
+*.aab
 
 # Worktree
 .worktrees/
