@@ -29,5 +29,11 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="continuous ambient audio buffer" />
         </service>
+
+        <service
+            android:name=".privileged.EchoraShellService"
+            android:exported="false"
+            android:process=":shizuku" />
+
     </application>
 </manifest>
