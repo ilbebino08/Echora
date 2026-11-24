@@ -79,6 +79,23 @@ batteria, e non deve passare dal percorso normale `RECORD_AUDIO` dell'app.
   quindi il ritmo lo dà la `read()` stessa, senza timer.
 - Buffer dell'`AudioRecord` lato processo privilegiato: ~4 s.
 
+### Chi possiede il buffer
+- Il processo privilegiato possiede solo l'`AudioRecord`: non può scrivere in `filesDir`
+  dell'app (uid 2000/0), quindi non tocca nessun file.
+- `CaptureService` (processo app) fa il loop di `read()` da 1 s e scrive il buffer. Il
+  processo app deve restare vivo perché la cattura continui; se viene ucciso la cattura
+  si ferma e il buffer riparte da capo al riavvio. Il foreground service è ciò che lo
+  tiene vivo.
+- `CaptureService` tiene un `PARTIAL_WAKE_LOCK` finché cattura: la `read()` bloccante ha
+  bisogno della CPU anche a schermo spento. Rilasciato in pausa e in teardown.
+
+### AppOps
+- Niente `startProxyOp`: Echora non è l'app che riceve uno stream da un servizio di
+  riconoscimento, legge i campioni da sé. Con uid 0 (Sui/root) il controllo AppOps non si
+  applica; con uid 2000 la cattura è coperta da `CAPTURE_AUDIO_HOTWORD` della shell.
+- A chi viene attribuito l'indicatore privacy in questo assetto va misurato nello spike,
+  non assunto: se l'indicatore lampeggia a nome di Echora va documentato in UI.
+
 ### Buffer
 - Un file preallocato in `filesDir/buffer.pcm`, dimensione = minuti · 60 · 32000 byte.
   Scrittura posizionale con avvolgimento (`writeOffset`, `filled`); nessun encoder,
@@ -90,13 +107,22 @@ batteria, e non deve passare dal percorso normale `RECORD_AUDIO` dell'app.
 - Durata massima del buffer 60 minuti (115 MB), controllata anche lo spazio libero.
 
 ### Ciclo di vita
+- Interruttore principale "Ascolto attivo" in UI e in notifica: spento = `CaptureService`
+  fermo, buffer svuotato. Lo stato è persistito; al boot il servizio riparte solo se
+  l'interruttore era acceso.
 - `CaptureService` foreground con tipo `specialUse` (Echora non dichiara `RECORD_AUDIO`,
   quindi non può usare il tipo `microphone`).
 - Avvio al boot via receiver; notifica con stato e azione "Pausa".
+- Riavvio automatico dopo il boot **solo con root/Sui**. Con Shizuku via ADB il servizio
+  privilegiato non c'è finché non si rilancia ADB: la UI mostra "servizio privilegiato non
+  disponibile" e il receiver non fa nulla.
 - Watchdog: binder morto, `read()` negativa o `startRecording()` fallita → teardown,
   stato in UI, retry con backoff.
 - Chiamata in corso (`AudioManager.mode != MODE_NORMAL`): cattura sospesa, per non
-  registrare l'audio della telefonata.
+  registrare l'audio della telefonata. Le chiamate VoIP non cambiano `mode`: non le
+  rileviamo, la sospensione in quel caso si affida al fatto che la sorgente `HOTWORD` è
+  occupata dalla telefonata. Da verificare nello spike; se il buffer contiene audio di
+  chiamata, serve un rilevamento in più.
 - Mic spento dal toggle di sistema (`SensorPrivacyManager`): cattura sospesa, ripresa
   automatica quando torna disponibile.
 
@@ -126,11 +152,15 @@ Prima di costruire la UI, spike sul telefono reale:
 1. Bind del user service come root (Sui) riesce e `isCompatible()` è true.
 2. 30 s di cattura `HOTWORD`: PCM non silenzioso, livello plausibile.
 3. Un'altra app registra dal microfono mentre Echora cattura: il flusso di Echora continua.
-4. Cosa mostra l'indicatore privacy durante la cattura (da documentare, non da aggirare).
+4. Cosa mostra l'indicatore privacy durante la cattura, e a chi è attribuito (da
+   documentare, non da aggirare).
 5. Mic spento dal sistema → `isMicrophoneDisabled()` true e cattura sospesa.
 6. Chiamata in arrivo → sospensione e ripresa.
-7. `HOTWORD` non disponibile → fallback a `MIC` con avviso in UI (conflitti possibili).
-8. Riavvio → servizio riparte da solo, buffer vuoto.
+7. Chiamata VoIP (WhatsApp/Signal) in corso: cosa finisce nel buffer. Se è audio di
+   chiamata, lo spike deve dire quale rilevamento serve.
+8. `HOTWORD` non disponibile → fallback a `MIC` con avviso in UI (conflitti possibili).
+9. Riavvio con Sui → servizio riparte da solo, buffer vuoto. Riavvio con Shizuku via ADB →
+   stato "non disponibile", nessun crash.
 
 Test unitari: avvolgimento del buffer, estrazione WAV a cavallo dell'avvolgimento, durata
 limitata ai minuti realmente presenti.
