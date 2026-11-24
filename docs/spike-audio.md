@@ -44,12 +44,13 @@ Una nuova esecuzione può differire di un blocco da 3200 byte (il ciclo legge fi
 il tempo, non un numero fisso di blocchi): è il motivo per cui la tabella dichiara l'ora.
 
 L'RMS non è un livello di riferimento: fra due esecuzioni nella stessa stanza HOTWORD 16k è
-passato da 528 a 137, e il 48k stereo vale ~5× il 16k mono perché somma due canali. Conta solo
-la differenza fra "zero" e "non zero".
+passato da 528 a 137, e i valori a 48 kHz non sono confrontabili con i 16 kHz (canali
+interleaved, path e gain diversi). Conta solo la differenza fra "zero" e "non zero".
 
 ## Attribuzione vista da `dumpsys audio`
 
-Sequenza completa di un ciclo (esecuzione delle 19:12; identica a ogni esecuzione):
+Sequenza completa di un ciclo (esecuzione delle 19:12; stessa forma, non linee identiche, a
+ogni esecuzione):
 
 ```
 11-24 19:12:42:205 rec update riid:1170679 uid:0 session:1172225 src:HOTWORD not silenced pack:
