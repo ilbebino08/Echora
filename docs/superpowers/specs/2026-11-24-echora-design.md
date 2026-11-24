@@ -16,6 +16,7 @@ batteria, e non deve passare dal percorso normale `RECORD_AUDIO` dell'app.
 ## Obiettivi
 
 - Cattura continua quando è abilitata: schermo spento, batteria ottimizzata, riavvio.
+- Anche durante una chiamata, telefonica o VoIP: la conversazione finisce nel buffer.
 - Buffer circolare, default 10 minuti, durata configurabile.
 - Salvataggio su richiesta degli ultimi N minuti, con N qualsiasi fino alla capienza del
   buffer, in un file `.wav` che si apre con qualunque player.
@@ -46,7 +47,8 @@ batteria, e non deve passare dal percorso normale `RECORD_AUDIO` dell'app.
 - Android 12+ (`minSdk 31`): il costruttore nascosto di `AudioRecord` che accetta un
   `Context` esiste da API 31, e `CAPTURE_AUDIO_HOTWORD` per la shell esiste da 12.
 - Formato imposto dalla sorgente: PCM 16 bit, mono, 16 kHz → 32 KB/s → 1,92 MB/min.
-- Una sola `AudioRecord` alla volta nel processo privilegiato.
+- Una sola `AudioRecord` alla volta sulla sorgente ambientale; durante una chiamata possono
+  essere attive due istanze (uplink + downlink) nel processo privilegiato.
 - Reflection sui costruttori nascosti con rami per API 31 / 34+.
 - AMM è GPL-3.0: il codice va scritto da zero seguendo il documento di analisi
   (`docs/accesso-microfono-privilegiato.md`), non copiato. Credito ad AMM nel README.
@@ -96,6 +98,40 @@ batteria, e non deve passare dal percorso normale `RECORD_AUDIO` dell'app.
 - A chi viene attribuito l'indicatore privacy in questo assetto va misurato nello spike,
   non assunto: se l'indicatore lampeggia a nome di Echora va documentato in UI.
 
+### Audio delle chiamate
+Requisito: se c'è una chiamata, telefonica o VoIP, il buffer deve contenerla. La sorgente
+`HOTWORD` non serve a questo: durante una chiamata è occupata o restituisce silenzio.
+Quindi il processo privilegiato cambia sorgente quando rileva una chiamata, e il rientro
+torna a `HOTWORD`.
+
+Rilevamento chiamata (senza permessi extra): `AudioManager.mode` diverso da `MODE_NORMAL`
+(copre le telefonate e le VoIP che usano `MODE_IN_COMMUNICATION`) **oppure** una
+`AudioRecordingConfiguration` attiva con sorgente `VOICE_COMMUNICATION` fra quelle
+restituite da `getActiveRecordingConfigurations()` (copre le VoIP che restano in
+`MODE_NORMAL`). Polling ogni 2 s, più il listener di `mode`.
+
+Meccanismo di cattura, in ordine di tentativo (lo decide lo spike sul device):
+
+1. **`VOICE_CALL`** come sorgente: se il dispositivo la concede al processo root, dà già la
+   conversazione intera (entrambe le parti) con una sola `AudioRecord`. È la soluzione
+   migliore e la più semplice.
+2. **`REMOTE_SUBMIX` + `MIC`**: due `AudioRecord` simultanee, downlink (l'altra persona) e
+   uplink (la tua voce), mixate in PCM dal processo app. Copre tutto ma richiede
+   `CAPTURE_AUDIO_OUTPUT` (concesso a root) e un mix nostro.
+3. **Solo `REMOTE_SUBMIX`**: si sente l'altra persona, non la tua voce. Degradazione
+   accettata se 1 e 2 non funzionano su questo telefono; va dichiarata in UI.
+
+Il formato del buffer resta uno solo: PCM 16 bit, mono, 16 kHz. Le sorgenti di chiamata
+arrivano a 48 kHz stereo, quindi all'ingresso c'è un downmix a mono e una decimazione a
+16 kHz. Il mix uplink+downlink (caso 2) si fa a 16 kHz mono, campione per campione.
+
+Conseguenze da accettare: durante il passaggio di sorgente c'è un buco di qualche centinaio
+di millisecondi; `REMOTE_SUBMIX` cattura tutto l'output del telefono (musica, notifiche),
+quindi va tenuta aperta solo mentre la chiamata è attiva.
+
+Nota legale, una volta sola: in Italia registrare una conversazione a cui partecipi è
+lecito, diffonderla no.
+
 ### Buffer
 - Un file preallocato in `filesDir/buffer.pcm`, dimensione = minuti · 60 · 32000 byte.
   Scrittura posizionale con avvolgimento (`writeOffset`, `filled`); nessun encoder,
@@ -118,11 +154,8 @@ batteria, e non deve passare dal percorso normale `RECORD_AUDIO` dell'app.
   disponibile" e il receiver non fa nulla.
 - Watchdog: binder morto, `read()` negativa o `startRecording()` fallita → teardown,
   stato in UI, retry con backoff.
-- Chiamata in corso (`AudioManager.mode != MODE_NORMAL`): cattura sospesa, per non
-  registrare l'audio della telefonata. Le chiamate VoIP non cambiano `mode`: non le
-  rileviamo, la sospensione in quel caso si affida al fatto che la sorgente `HOTWORD` è
-  occupata dalla telefonata. Da verificare nello spike; se il buffer contiene audio di
-  chiamata, serve un rilevamento in più.
+- Chiamata in corso (telefonata o VoIP): la cattura **non si sospende** ma cambia sorgente,
+  vedi "Audio delle chiamate".
 - Mic spento dal toggle di sistema (`SensorPrivacyManager`): cattura sospesa, ripresa
   automatica quando torna disponibile.
 
@@ -155,12 +188,16 @@ Prima di costruire la UI, spike sul telefono reale:
 4. Cosa mostra l'indicatore privacy durante la cattura, e a chi è attribuito (da
    documentare, non da aggirare).
 5. Mic spento dal sistema → `isMicrophoneDisabled()` true e cattura sospesa.
-6. Chiamata in arrivo → sospensione e ripresa.
-7. Chiamata VoIP (WhatsApp/Signal) in corso: cosa finisce nel buffer. Se è audio di
-   chiamata, lo spike deve dire quale rilevamento serve.
-8. `HOTWORD` non disponibile → fallback a `MIC` con avviso in UI (conflitti possibili).
-9. Riavvio con Sui → servizio riparte da solo, buffer vuoto. Riavvio con Shizuku via ADB →
-   stato "non disponibile", nessun crash.
+6. Chiamata telefonica in arrivo → la sorgente cambia, la conversazione (entrambe le parti
+   o solo l'altra, secondo il meccanismo che regge) finisce nel buffer, rientro a `HOTWORD`
+   a fine chiamata.
+7. Chiamata VoIP (WhatsApp/Signal) in corso: rilevata, cambiata sorgente, audio nel buffer.
+   Se il rilevamento non scatta, è un fallimento da correggere prima della UI.
+8. `VOICE_CALL` muta o assente → verifica del percorso `REMOTE_SUBMIX`/`MIC`; se anche quello
+   fallisce, solo downlink e avviso in UI.
+9. `HOTWORD` non disponibile → fallback a `MIC` con avviso in UI (conflitti possibili).
+10. Riavvio con Sui → servizio riparte da solo, buffer vuoto. Riavvio con Shizuku via ADB →
+    stato "non disponibile", nessun crash.
 
 Test unitari: avvolgimento del buffer, estrazione WAV a cavallo dell'avvolgimento, durata
 limitata ai minuti realmente presenti.
