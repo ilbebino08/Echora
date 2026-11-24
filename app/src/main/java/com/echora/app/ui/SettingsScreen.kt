@@ -10,6 +10,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,9 +30,9 @@ fun SettingsScreen(
     onBack: () -> Unit
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
-    val bufferMinutes = mutableStateOf(settings.bufferMinutes)
-    val listeningEnabled = mutableStateOf(settings.listeningEnabled)
-    val startOnBoot = mutableStateOf(settings.startOnBoot)
+    val bufferMinutes = remember { mutableStateOf(settings.bufferMinutes) }
+    val listeningEnabled = remember { mutableStateOf(settings.listeningEnabled) }
+    val startOnBoot = remember { mutableStateOf(settings.startOnBoot) }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),

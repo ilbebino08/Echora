@@ -152,6 +152,7 @@ class CaptureService : Service() {
             })
 
             updateState(CaptureState.Recording)
+            @Suppress("WrongConstant")
             startForeground(NOTIFICATION_ID, buildNotification("In registrazione..."), FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
 
             // Watch call state changes
