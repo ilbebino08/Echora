@@ -43,7 +43,6 @@ public final class Spike {
                 measure(source, format[0], format[1], context, setSource, recordCtor);
             }
         }
-        Looper.myLooper().quit();
     }
 
     private static Context systemContext() throws Exception {
