@@ -96,5 +96,22 @@ class PcmRingBuffer(
     companion object {
         /** 60 min * 60 s * 32000 B/s. Oltre, la richiesta è un errore. */
         const val MAX_CAPACITY = 60 * 60 * 32000
+
+        /** Legge gli ultimi `byteCount` byte da un file buffer esistente. */
+        fun getLastBytes(file: java.io.File, byteCount: Long): ByteArray {
+            if (!file.exists()) return ByteArray(0)
+            val length = file.length()
+            val available = minOf(length, byteCount).toInt()
+            if (available <= 0) return ByteArray(0)
+            val result = ByteArray(available)
+            val raf = java.io.RandomAccessFile(file, "r")
+            try {
+                raf.seek(length - available)
+                raf.readFully(result)
+            } finally {
+                raf.close()
+            }
+            return result
+        }
     }
 }
