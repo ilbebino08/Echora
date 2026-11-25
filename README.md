@@ -48,6 +48,10 @@ Echora runs an audio recorder in a Shizuku user service and streams 16-bit mono 
 
 Run the unit tests with `./gradlew :app:testDebugUnitTest`.
 
+## Publish a preview
+
+Update `versionName` and increment `versionCode`, then push a matching tag such as `v0.1.2`. The Android release workflow builds, tests, signs, and publishes the preview APK. To test signing against an existing tag without publishing, run the workflow manually.
+
 ## Credits and license
 
 Echora's source is licensed under the [MIT License](LICENSE). The privileged capture design was inspired by [Ambient Music Mod](https://github.com/KieronQuinn/AmbientMusicMod) by Kieron Quinn.
