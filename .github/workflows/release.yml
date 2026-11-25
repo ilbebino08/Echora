@@ -26,14 +26,14 @@ jobs:
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
 
       - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
           packages: 'platforms;android-36 build-tools;36.0.0'
 
       - name: Build and test
-        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        run: ./gradlew --no-daemon -Dorg.gradle.java.home="$JAVA_HOME" :app:testDebugUnitTest :app:assembleDebug
 
       - name: Verify the signed draft APK and publish the preview
         env:
