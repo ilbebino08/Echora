@@ -1,8 +1,12 @@
 name: Android release
 
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag with a draft release and signed APK
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,10 +15,13 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+          ref: refs/tags/${{ inputs.tag }}
 
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
@@ -27,35 +34,22 @@ jobs:
       - name: Build and test
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
-      - name: Sign and verify the APK
-        env:
-          ECHORA_SIGNING_KEYSTORE: ${{ secrets.ECHORA_SIGNING_KEYSTORE }}
-          ECHORA_SIGNING_PASSWORD: ${{ secrets.ECHORA_SIGNING_PASSWORD }}
-        run: |
-          set -euo pipefail
-          sdk_tools="$ANDROID_HOME/build-tools/36.0.0"
-          apk=app/build/outputs/apk/debug/app-debug.apk
-          version=$("$sdk_tools/aapt" dump badging "$apk" | sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p")
-          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match APK version $version."
-            exit 1
-          fi
-          umask 077
-          keystore=$(mktemp "$RUNNER_TEMP/echora.XXXXXX.p12")
-          trap 'rm -f "$keystore"' EXIT
-          printf '%s' "$ECHORA_SIGNING_KEYSTORE" | base64 --decode > "$keystore"
-          artifact="Echora-$GITHUB_REF_NAME-debug.apk"
-          "$sdk_tools/apksigner" sign \
-            --ks "$keystore" --ks-key-alias echora --ks-pass env:ECHORA_SIGNING_PASSWORD \
-            --lineage .github/signing/echora.lineage --rotation-min-sdk-version 28 \
-            --v1-signing-enabled false --v2-signing-enabled false --v3-signing-enabled true \
-            --out "$artifact" "$apk"
-          "$sdk_tools/apksigner" verify --verbose "$artifact"
-
-      - name: Publish the preview
+      - name: Verify the signed draft APK and publish the preview
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "Echora-$GITHUB_REF_NAME-debug.apk" \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --generate-notes \
-            --title "Echora $GITHUB_REF_NAME Preview"
+          set -euo pipefail
+          sdk_tools="$ANDROID_HOME/build-tools/36.0.0"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)
+          [[ "$draft" == true ]]
+          artifact="Echora-$RELEASE_TAG-debug.apk"
+          gh release download "$RELEASE_TAG" --pattern "$artifact"
+          certificates=$("$sdk_tools/apksigner" verify --print-certs "$artifact")
+          # Require the dedicated Echora signing certificate.
+          [[ "$certificates" == *"certificate SHA-256 digest: 76ce4f5c9f0ed2fb87ec383550c9361c62297b27d5d9a2be299464f8d2551ce8"* ]]
+          for apk in app/build/outputs/apk/debug/app-debug.apk "$artifact"; do
+            package=$("$sdk_tools/aapt" dump badging "$apk" | awk -F"'" '/^package: / {print $2 " v" $6}')
+            [[ "$package" == "com.echora.app $RELEASE_TAG" ]]
+          done
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease
