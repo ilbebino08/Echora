@@ -3,19 +3,20 @@ package com.echora.app.capture
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.pm.ServiceInfo
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.RemoteException
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.echora.app.MainActivity
+import androidx.core.app.ServiceCompat
 import com.echora.app.audio.PcmRingBuffer
 import com.echora.app.privileged.ShellConnection
 import com.echora.app.privileged.ShellConnection.ShellStatus
@@ -39,12 +40,19 @@ class CaptureService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CHANNEL_ID = "echora_capture"
         private const val CHUNK_SIZE = 3200 // 100ms at 16kHz mono 16-bit
-        private const val FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 16 // android.app.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
 
-        // Audio source constants (from spike: HOTWORD=1999, VOICE_CALL=4, REMOTE_SUBMIX=8)
+        // Audio sources used by the capture service.
         const val SOURCE_HOTWORD = 1999
         const val SOURCE_VOICE_CALL = android.media.MediaRecorder.AudioSource.VOICE_CALL // 4
-        const val SOURCE_REMOTE_SUBMIX = 8
+
+        @Volatile
+        private var ringBuffer: PcmRingBuffer? = null
+
+        internal fun readRecentAudio(byteCount: Long): ByteArray {
+            val pcm = ringBuffer?.readLast(byteCount) ?: ByteArray(0)
+            check(pcm.isNotEmpty()) { "Il buffer non contiene ancora audio" }
+            return pcm
+        }
 
         fun start(context: Context) {
             context.startForegroundService(Intent(context, CaptureService::class.java).setAction(ACTION_START))
@@ -61,12 +69,11 @@ class CaptureService : Service() {
 
     private var shellConnection: ShellConnection? = null
     private var settings: Settings? = null
-    private var ringBuffer: PcmRingBuffer? = null
     private var scope = CoroutineScope(Dispatchers.IO)
     private var wakeLock: android.os.PowerManager.WakeLock? = null
     private var isRunning = false
     private var consecutiveZeroFrames = 0
-    private var currentSource = SOURCE_HOTWORD
+    private var recordingState: CaptureState = CaptureState.Recording
     private var callMonitor: CallMonitor? = null
     private var captureRef: com.echora.app.IEchoraCapture? = null
 
@@ -101,7 +108,18 @@ class CaptureService : Service() {
 
     private fun startCapture() {
         if (isRunning) return
-        if (!settings?.listeningEnabled!!) return
+        val captureSettings = settings
+        if (captureSettings?.listeningEnabled != true) {
+            stopSelf()
+            return
+        }
+
+        ServiceCompat.startForeground(
+            this,
+            NOTIFICATION_ID,
+            buildForegroundNotification(),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        )
 
         isRunning = true
         acquireWakeLock()
@@ -122,8 +140,7 @@ class CaptureService : Service() {
             }
 
             if (!ready) {
-                updateState(CaptureState.Error("Timeout connessione Shizuku"))
-                stopCapture()
+                stopCapture(CaptureState.Error("Connessione Shizuku scaduta"))
                 return@launch
             }
 
@@ -131,55 +148,86 @@ class CaptureService : Service() {
             captureRef = capture
 
             // Initialize ring buffer
-            val capacity = settings!!.bufferMinutes * 60 * 32000
+            val capacity = captureSettings.bufferMinutes * 60 * 32000
             val bufferFile = File(filesDir, "buffer.pcm")
             ringBuffer = PcmRingBuffer(bufferFile, capacity)
-            ringBuffer?.reset()
 
             // Start call monitoring
             callMonitor?.start()
 
-            // Open initial HOTWORD source
-            openSource(SOURCE_HOTWORD, capture)
-            currentSource = SOURCE_HOTWORD
-
             // Set mic listener
             capture.setMicListener(object : com.echora.app.IMicStateCallback.Stub() {
                 override fun onMicDisabledChanged(disabled: Boolean) {
+                    if (!isRunning || recordingState == CaptureState.PausedForCall) return
                     if (disabled) updateState(CaptureState.MicDisabled)
-                    else if (isRunning) updateStateForCurrentSource()
+                    else updateState(recordingState)
                 }
             })
 
-            updateState(CaptureState.Recording)
-            @Suppress("WrongConstant")
-            startForeground(NOTIFICATION_ID, buildNotification("In registrazione..."), FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-
-            // Watch call state changes
-            val callStateJob = scope.launch {
-                callMonitor?.isCallActive?.collect { isCall: Boolean ->
-                    if (!isRunning) return@collect
-                    handleCallStateChange(isCall, capture)
-                }
-            }
-
-            // Capture loop
+            var currentCall: CallKind? = null
             val chunk = ByteArray(CHUNK_SIZE)
             while (isRunning) {
-                val n = capture.read(chunk, chunk.size)
+                val kind = callMonitor?.call?.value ?: CallKind.NONE
+                if (captureSettings.shouldPauseForCall(kind)) {
+                    if (recordingState != CaptureState.PausedForCall) {
+                        try {
+                            capture.release()
+                        } catch (e: RemoteException) {
+                            Log.w("EchoraCapture", "Collegamento alla cattura interrotto", e)
+                            stopCapture(CaptureState.Error("Collegamento a Shizuku interrotto"))
+                            return@launch
+                        }
+                        currentCall = null
+                        recordingState = CaptureState.PausedForCall
+                        updateState(recordingState)
+                        Log.d("EchoraCapture", "Cattura sospesa per chiamata: $kind")
+                    }
+                    delay(100)
+                    continue
+                }
+                if (currentCall != kind) {
+                    try {
+                        recordingState = openFor(currentCall, kind, capture)
+                    } catch (e: Exception) {
+                        Log.w("EchoraCapture", "Impossibile cambiare sorgente audio", e)
+                        stopCapture(CaptureState.Error("Impossibile aprire il microfono"))
+                        return@launch
+                    }
+                    currentCall = kind
+                    updateState(recordingState)
+                }
+                val n = try {
+                    val count = capture.read(chunk, chunk.size)
+                    val state = recordingState as? CaptureState.CallRecording
+                    if (state?.kind == CallKind.VOIP && state.hasMicrophone && capture.actualSampleRate() == 0) {
+                        recordingState = state.copy(hasMicrophone = false)
+                        updateState(recordingState)
+                    }
+                    count
+                } catch (e: RemoteException) {
+                    Log.w("EchoraCapture", "Collegamento alla cattura interrotto", e)
+                    stopCapture(CaptureState.Error("Collegamento a Shizuku interrotto"))
+                    return@launch
+                }
+                if (captureSettings.shouldPauseForCall(callMonitor?.call?.value ?: CallKind.NONE)) continue
                 when {
                     n > 0 -> {
                         val rb = ringBuffer
                         if (rb != null) {
+                            val firstBlock = rb.filledBytes() == 0L
                             rb.append(chunk, 0, n)
+                            if (firstBlock) Log.d("EchoraCapture", "Primo blocco PCM ricevuto: $n byte")
                         }
                         consecutiveZeroFrames = 0
-                        updateStateForCurrentSource()
                     }
                     n == 0 -> {
                         // No data available, continue
                     }
                     n < 0 -> {
+                        if (callMonitor?.call?.value != currentCall) {
+                            currentCall = null
+                            continue
+                        }
                         updateState(CaptureState.Error("Errore lettura: $n"))
                         break
                     }
@@ -201,112 +249,70 @@ class CaptureService : Service() {
                     }
                 }
 
-                // Update notification every ~5 seconds
-                if (System.currentTimeMillis() % 5000 < 100) {
-                    updateNotification("In registrazione... ${rb?.filledBytes()?.div(32000) ?: 0}s")
-                }
-
                 delay(10)
             }
 
-            // Cleanup on loop exit
-            callStateJob.cancel()
-            capture.release()
-            ringBuffer?.close()
-            ringBuffer = null
-            captureRef = null
-            stopForeground(true)
-            stopSelf()
-            isRunning = false
-            releaseWakeLock()
-            updateState(CaptureState.Idle)
+            stopCapture(CaptureStates.current.value as? CaptureState.Error ?: CaptureState.Idle)
         }
     }
 
-    private fun handleCallStateChange(isCall: Boolean, capture: com.echora.app.IEchoraCapture) {
-        if (isCall) {
-            // Call started - switch to call source
-            if (currentSource != SOURCE_HOTWORD) return // Already on call source
-
-            Log.d("EchoraCapture", "Call started, switching to call source")
-            updateState(CaptureState.CallRecording)
-
-            // Try VOICE_CALL first, then REMOTE_SUBMIX
-            var success = false
-            for (source in listOf(SOURCE_VOICE_CALL, SOURCE_REMOTE_SUBMIX)) {
-                try {
-                    capture.release()
-                    capture.open(source, 16000, 1, 128000)
-                    currentSource = source
-                    success = true
-                    Log.d("EchoraCapture", "Switched to call source: $source")
-                    break
-                } catch (e: Exception) {
-                    Log.w("EchoraCapture", "Failed to open source $source", e)
-                }
-            }
-
-            if (!success) {
-                // Fallback to HOTWORD
-                Log.w("EchoraCapture", "Call sources failed, staying on HOTWORD")
-                try {
-                    capture.release()
-                    capture.open(SOURCE_HOTWORD, 16000, 1, 128000)
-                    currentSource = SOURCE_HOTWORD
-                } catch (e: Exception) {
-                    Log.e("EchoraCapture", "Failed to reopen HOTWORD", e)
-                }
-            }
-        } else {
-            // Call ended - switch back to HOTWORD
-            if (currentSource == SOURCE_HOTWORD) return // Already on HOTWORD
-
-            Log.d("EchoraCapture", "Call ended, switching back to HOTWORD")
+    private fun openFor(
+        previous: CallKind?,
+        kind: CallKind,
+        capture: com.echora.app.IEchoraCapture
+    ): CaptureState {
+        if (kind == CallKind.TELEPHONE) {
             try {
-                capture.release()
-                capture.open(SOURCE_HOTWORD, 16000, 1, 128000)
-                currentSource = SOURCE_HOTWORD
-                updateState(CaptureState.Recording)
+                capture.open(SOURCE_VOICE_CALL, 16000, 1, 128000)
+                Log.d("EchoraCapture", "Sorgente telefonica VOICE_CALL attiva")
+                return CaptureState.CallRecording(kind, hasCallAudio = true)
             } catch (e: Exception) {
-                Log.e("EchoraCapture", "Failed to reopen HOTWORD after call", e)
-                updateState(CaptureState.Error("Errore riapertura microfono: ${e.message}"))
+                Log.w("EchoraCapture", "VOICE_CALL non disponibile", e)
             }
         }
+
+        if (kind == CallKind.VOIP) {
+            val hasMicrophone = try {
+                capture.open(MediaRecorder.AudioSource.MIC, 16000, 1, 128000)
+                true
+            } catch (e: RuntimeException) {
+                Log.w("EchoraCapture", "Microfono non disponibile durante la chiamata", e)
+                false
+            }
+
+            try {
+                capture.enableVoipPlayback(16000)
+                return CaptureState.CallRecording(kind, hasCallAudio = true, hasMicrophone = hasMicrophone)
+            } catch (e: Exception) {
+                Log.w("EchoraCapture", "Loopback VoIP non disponibile", e)
+                if (!hasMicrophone) throw e
+            }
+            return CaptureState.CallRecording(kind, hasCallAudio = false)
+        }
+
+        capture.open(SOURCE_HOTWORD, 16000, 1, 128000)
+        if (previous == CallKind.VOIP) Log.d("EchoraCapture", "Cattura ambientale ripristinata")
+        return if (kind == CallKind.NONE) CaptureState.Recording
+            else CaptureState.CallRecording(kind, hasCallAudio = false)
     }
 
-    private fun openSource(source: Int, capture: com.echora.app.IEchoraCapture) {
-        try {
-            capture.open(source, 16000, 1, 128000)
-        } catch (e: Exception) {
-            Log.e("EchoraCapture", "Failed to open source $source", e)
-            throw e
-        }
-    }
-
-    private fun updateStateForCurrentSource() {
-        val newState = when (currentSource) {
-            SOURCE_HOTWORD -> CaptureState.Recording
-            SOURCE_VOICE_CALL, SOURCE_REMOTE_SUBMIX -> CaptureState.CallRecording
-            else -> CaptureState.Recording
-        }
-        if (CaptureStates.current.value != newState) {
-            updateState(newState)
-        }
-    }
-
-    private fun stopCapture() {
+    private fun stopCapture(finalState: CaptureState = CaptureState.Idle) {
         if (!isRunning) return
         isRunning = false
         scope.cancel()
-        captureRef?.release()
+        try {
+            captureRef?.release()
+        } catch (e: RemoteException) {
+            Log.w("EchoraCapture", "Collegamento già chiuso", e)
+        }
         ringBuffer?.close()
         ringBuffer = null
         captureRef = null
         callMonitor?.stop()
         stopForeground(true)
-        stopSelf()
         releaseWakeLock()
-        updateState(CaptureState.Idle)
+        updateState(finalState)
+        stopSelf()
     }
 
     private fun acquireWakeLock() {
@@ -315,6 +321,7 @@ class CaptureService : Service() {
         wakeLock?.acquire()
     }
 
+    @Synchronized
     private fun releaseWakeLock() {
         wakeLock?.release()
         wakeLock = null
@@ -334,24 +341,14 @@ class CaptureService : Service() {
         }
     }
 
-    private fun buildNotification(text: String): Notification {
-        val intent = Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK }
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildForegroundNotification(): Notification =
+        NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Echora")
-            .setContentText(text)
+            .setContentText("Servizio di cattura audio")
             .setSmallIcon(android.R.drawable.ic_media_play)
-            .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .build()
-    }
-
-    private fun updateNotification(text: String) {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(text))
-    }
 
     private fun updateState(state: CaptureState) {
         CaptureStates.current.value = state

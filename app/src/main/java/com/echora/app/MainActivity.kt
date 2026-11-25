@@ -1,117 +1,88 @@
 package com.echora.app
 
-import android.Manifest
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.echora.app.capture.CaptureService
-import com.echora.app.capture.CaptureState
-import com.echora.app.capture.CaptureStates
 import com.echora.app.capture.Settings
 import com.echora.app.privileged.ShellConnection
-import com.echora.app.privileged.ShellConnection.ShellStatus
 import com.echora.app.ui.EchoraScreen
+import com.echora.app.ui.EchoraTheme
 import com.echora.app.ui.SaveRequest
 import com.echora.app.ui.SettingsScreen
-import com.echora.app.save.Saver
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import rikka.shizuku.Shizuku
 
 class MainActivity : ComponentActivity() {
 
     private val shellConnection = ShellConnection(this)
-    private val settings = Settings.create(this)
+    private val settings by lazy { Settings.create(this) }
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            shellConnection.start()
+    private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
+        shellConnection.start()
+        if (Shizuku.pingBinder() && !Shizuku.isPreV11() && Shizuku.checkSelfPermission() == 0) {
+            startListeningIfEnabled()
         }
     }
 
-    private val notificationPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        Log.d("EchoraMain", "Notification permission granted: $granted")
+    private val permissionResultListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
+        if (requestCode == REQUEST_CODE && grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            shellConnection.start()
+            startListeningIfEnabled()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    MainScreen(
-                        shellConnection = shellConnection,
-                        settings = settings,
-                        onRequestPermission = { requestPermission() },
-                        onShareFile = ::shareFile
-                    )
-                }
+            EchoraTheme {
+                MainScreen(
+                    shellConnection = shellConnection,
+                    settings = settings,
+                    onRequestPermission = ::requestPermission,
+                    onShareFile = ::shareFile
+                )
             }
         }
-        checkAndRequestPermissions()
+        Shizuku.addRequestPermissionResultListener(permissionResultListener)
+        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
     }
 
     override fun onDestroy() {
+        Shizuku.removeBinderReceivedListener(binderReceivedListener)
+        Shizuku.removeRequestPermissionResultListener(permissionResultListener)
+        shellConnection.stop(removeService = false)
         super.onDestroy()
-        shellConnection.stop()
     }
 
-    private fun checkAndRequestPermissions() {
-        // Request Shizuku permission
-        if (Shizuku.checkSelfPermission() == 0) {
-            shellConnection.start()
-        } else if (Shizuku.isPreV11()) {
-            Log.w("EchoraMain", "Shizuku pre-v11, not supported")
-        } else {
-            requestPermission()
-        }
-
-        // Request notification permission (API 33+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-
-        // Start capture service if enabled
+    private fun startListeningIfEnabled() {
         if (settings.listeningEnabled) {
             CaptureService.start(this)
         }
     }
 
     private fun requestPermission() {
-        Shizuku.requestPermission(REQUEST_CODE)
+        if (Shizuku.pingBinder()) Shizuku.requestPermission(REQUEST_CODE)
     }
 
     private fun shareFile(uri: Uri) {
@@ -135,50 +106,54 @@ fun MainScreen(
     onRequestPermission: () -> Unit,
     onShareFile: (Uri) -> Unit
 ) {
-    val shellStatus = shellConnection.status.collectAsStateWithLifecycle().value
-    val captureState = CaptureStates.current.collectAsStateWithLifecycle().value
+    val shellStatus by shellConnection.status.collectAsStateWithLifecycle()
+    val snackbarHostState = remember { SnackbarHostState() }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    var pendingSaveResult by remember { mutableStateOf<SaveRequest?>(null) }
 
-    val snackbarHostState = rememberSaveable { SnackbarHostState() }
-    val showSettings = rememberSaveable { mutableStateOf(false) }
-    val pendingSaveResult = rememberSaveable { mutableStateOf<SaveRequest?>(null) }
+    BackHandler(enabled = showSettings) { showSettings = false }
 
-    // Handle save result with LaunchedEffect (showSnackbar is suspend)
-    val saveResult = pendingSaveResult.value
+    val saveResult = pendingSaveResult
     if (saveResult != null) {
         LaunchedEffect(saveResult) {
-            if (saveResult.error != null) {
+            val uri = saveResult.uri
+            if (uri == null) {
                 snackbarHostState.showSnackbar(
-                    message = "Errore salvataggio: ${saveResult.error}",
-                    actionLabel = "OK"
+                    message = "Salvataggio non riuscito. Riprova.",
+                    withDismissAction = true
                 )
-            } else if (saveResult.uri != null) {
+            } else {
                 val result = snackbarHostState.showSnackbar(
-                    message = "Salvato: ${Saver.fileName(saveResult.minutes)}",
-                    actionLabel = "Condividi"
+                    message = "Registrazione salvata in Musica/Echora",
+                    actionLabel = "Condividi",
+                    withDismissAction = true
                 )
-                if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) {
-                    onShareFile(saveResult.uri!!)
-                }
+                if (result == SnackbarResult.ActionPerformed) onShareFile(uri)
             }
-            pendingSaveResult.value = null
+            pendingSaveResult = null
         }
     }
 
-    if (showSettings.value) {
-        SettingsScreen(
-            settings = settings,
-            onBack = { showSettings.value = false }
-        )
-    } else {
-        EchoraScreen(
-            shellStatus = shellStatus,
-            settings = settings,
-            onOpenSettings = { showSettings.value = true },
-            onSaveComplete = { req ->
-                pendingSaveResult.value = req
-            }
-        )
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) }
+    ) { insets ->
+        if (showSettings) {
+            SettingsScreen(
+                settings = settings,
+                onBack = { showSettings = false },
+                modifier = Modifier.padding(insets)
+            )
+        } else {
+            EchoraScreen(
+                shellStatus = shellStatus,
+                settings = settings,
+                onOpenSettings = { showSettings = true },
+                onRequestPermission = onRequestPermission,
+                onSaveComplete = { pendingSaveResult = it },
+                modifier = Modifier.padding(insets)
+            )
+        }
     }
-
-    SnackbarHost(snackbarHostState)
 }

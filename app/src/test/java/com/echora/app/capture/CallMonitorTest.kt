@@ -1,24 +1,19 @@
 package com.echora.app.capture
 
-import org.junit.Assert.assertTrue
-import org.junit.Assert.assertFalse
+import android.media.AudioManager
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class CallMonitorTest {
-
-    @Test fun `voip recording triggers call detection`() {
-        assertTrue(CallDetection.isCallRecording(listOf(RecordingSnapshot(7)))) // VOICE_COMMUNICATION
+    @Test fun `classifies telephone and VoIP separately`() {
+        assertEquals(CallKind.TELEPHONE, detectCall(AudioManager.MODE_IN_CALL, true))
+        assertEquals(CallKind.VOIP, detectCall(AudioManager.MODE_IN_COMMUNICATION, false))
+        assertEquals(CallKind.VOIP, detectCall(AudioManager.MODE_NORMAL, true))
     }
 
-    @Test fun `normal mic recording does not`() {
-        assertFalse(CallDetection.isCallRecording(listOf(RecordingSnapshot(1), RecordingSnapshot(6)))) // MIC, VOICE_RECOGNITION
-    }
-
-    @Test fun `empty list does not trigger`() {
-        assertFalse(CallDetection.isCallRecording(emptyList()))
-    }
-
-    @Test fun `mixed with voip triggers`() {
-        assertTrue(CallDetection.isCallRecording(listOf(RecordingSnapshot(1), RecordingSnapshot(7))))
+    @Test fun `ringtone and call screening are not active calls`() {
+        assertEquals(CallKind.NONE, detectCall(AudioManager.MODE_RINGTONE, true))
+        assertEquals(CallKind.NONE, detectCall(AudioManager.MODE_CALL_SCREENING, false))
+        assertEquals(CallKind.NONE, detectCall(AudioManager.MODE_NORMAL, false))
     }
 }

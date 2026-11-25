@@ -34,6 +34,7 @@ class PcmRingBuffer(
     }
 
     /** Scrive tutti i byte di `src` nel buffer, avvolgendo e sovrascrivendo i più vecchi. */
+    @Synchronized
     fun append(src: ByteArray, offset: Int = 0, count: Int = src.size) {
         if (count <= 0) return
         val raf = RandomAccessFile(file, "rw")
@@ -55,14 +56,16 @@ class PcmRingBuffer(
     }
 
     /** Numero di byte validi attualmente nel buffer (saturato a `capacity`). */
+    @Synchronized
     fun filledBytes(): Long = filled.toLong()
 
     /** Legge al massimo `byteCount` byte, dal più vecchio al più nuovo. */
+    @Synchronized
     fun readLast(byteCount: Long): ByteArray {
         val available = minOf(filled.toLong(), byteCount).toInt()
         if (available <= 0) return ByteArray(0)
 
-        val start = (writePos - filled + capacity) % capacity
+        val start = (writePos - available + capacity) % capacity
         val result = ByteArray(available)
         val raf = RandomAccessFile(file, "rw")
         try {
@@ -83,6 +86,7 @@ class PcmRingBuffer(
     }
 
     /** Svuota il buffer. */
+    @Synchronized
     fun reset() {
         filled = 0
         writePos = 0
@@ -96,22 +100,5 @@ class PcmRingBuffer(
     companion object {
         /** 60 min * 60 s * 32000 B/s. Oltre, la richiesta è un errore. */
         const val MAX_CAPACITY = 60 * 60 * 32000
-
-        /** Legge gli ultimi `byteCount` byte da un file buffer esistente. */
-        fun getLastBytes(file: java.io.File, byteCount: Long): ByteArray {
-            if (!file.exists()) return ByteArray(0)
-            val length = file.length()
-            val available = minOf(length, byteCount).toInt()
-            if (available <= 0) return ByteArray(0)
-            val result = ByteArray(available)
-            val raf = java.io.RandomAccessFile(file, "r")
-            try {
-                raf.seek(length - available)
-                raf.readFully(result)
-            } finally {
-                raf.close()
-            }
-            return result
-        }
     }
 }

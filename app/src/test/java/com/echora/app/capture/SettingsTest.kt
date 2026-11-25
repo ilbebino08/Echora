@@ -1,6 +1,7 @@
 package com.echora.app.capture
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.verify
@@ -58,5 +59,22 @@ class SettingsTest {
         `when`(prefs.getBoolean("startOnBoot", true)).thenReturn(true)
         val settings = Settings(prefs)
         assertTrue(settings.startOnBoot)
+    }
+
+    @Test fun `call recording keeps existing default and pauses only detected calls when disabled`() {
+        val prefs = mock<SharedPreferences>()
+        val editor = mock<Editor>()
+        `when`(prefs.edit()).thenReturn(editor)
+        `when`(editor.putBoolean("recordCalls", false)).thenReturn(editor)
+        `when`(prefs.getBoolean("recordCalls", true)).thenReturn(true, false)
+        val settings = Settings(prefs)
+
+        assertFalse(settings.shouldPauseForCall(CallKind.TELEPHONE))
+        settings.recordCalls = false
+        verify(editor).putBoolean("recordCalls", false)
+        verify(editor).apply()
+        assertTrue(settings.shouldPauseForCall(CallKind.TELEPHONE))
+        assertTrue(settings.shouldPauseForCall(CallKind.VOIP))
+        assertFalse(settings.shouldPauseForCall(CallKind.NONE))
     }
 }

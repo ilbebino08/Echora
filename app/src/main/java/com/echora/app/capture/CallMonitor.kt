@@ -2,8 +2,6 @@ package com.echora.app.capture
 
 import android.media.MediaRecorder
 import android.media.AudioManager
-import android.media.AudioRecordingConfiguration
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,19 +15,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-data class RecordingSnapshot(val source: Int)
+enum class CallKind { NONE, TELEPHONE, VOIP }
 
-object CallDetection {
-    /** True se almeno uno snapshot ha source VOICE_COMMUNICATION (7). */
-    fun isCallRecording(active: List<RecordingSnapshot>): Boolean {
-        return active.any { it.source == MediaRecorder.AudioSource.VOICE_COMMUNICATION }
-    }
+internal fun detectCall(mode: Int, hasVoipRecording: Boolean): CallKind = when (mode) {
+    AudioManager.MODE_IN_CALL, AudioManager.MODE_CALL_REDIRECT -> CallKind.TELEPHONE
+    AudioManager.MODE_IN_COMMUNICATION, AudioManager.MODE_COMMUNICATION_REDIRECT -> CallKind.VOIP
+    AudioManager.MODE_NORMAL -> if (hasVoipRecording) CallKind.VOIP else CallKind.NONE
+    else -> CallKind.NONE
 }
 
 class CallMonitor(private val audioManager: AudioManager) {
 
-    private val _isCallActive = MutableStateFlow(false)
-    val isCallActive: StateFlow<Boolean> = _isCallActive
+    private val _call = MutableStateFlow(CallKind.NONE)
+    val call: StateFlow<CallKind> = _call
 
     private var scope: CoroutineScope = CoroutineScope(Dispatchers.IO)
     private var pollJob: Job? = null
@@ -54,62 +52,32 @@ class CallMonitor(private val audioManager: AudioManager) {
             }
         }
 
-        // Listen for mode changes (API 31+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            modeListener = object : AudioManager.OnModeChangedListener {
-                override fun onModeChanged(mode: Int) {
-                    Log.d("EchoraCallMonitor", "Audio mode changed: $mode")
-                    checkCallState()
-                }
-            }
-            audioManager.addOnModeChangedListener(mainExecutor, modeListener!!)
-        }
+        val listener = AudioManager.OnModeChangedListener { checkCallState() }
+        modeListener = listener
+        audioManager.addOnModeChangedListener(mainExecutor, listener)
     }
 
     fun stop() {
         pollJob?.cancel()
-        if (modeListener != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            audioManager.removeOnModeChangedListener(modeListener!!)
-            modeListener = null
-        }
+        modeListener?.let(audioManager::removeOnModeChangedListener)
+        modeListener = null
         scope.cancel()
     }
 
-    fun isCallActiveNow(): Boolean = _isCallActive.value
-
     private fun checkCallState() {
-        val wasActive = _isCallActive.value
-        val nowActive = detectCall()
-
-        if (wasActive != nowActive) {
-            _isCallActive.value = nowActive
-            Log.d("EchoraCallMonitor", "Call state changed: $nowActive")
-        }
-    }
-
-    private fun detectCall(): Boolean {
-        // 1. Check AudioManager mode
         val mode = audioManager.mode
-        if (mode != AudioManager.MODE_NORMAL) {
-            Log.d("EchoraCallMonitor", "Call detected via mode: $mode")
-            return true
-        }
-
-        // 2. Check active recording configurations for VOICE_COMMUNICATION
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                val configs = audioManager.getActiveRecordingConfigurations()
-                for (config in configs) {
-                    if (config.clientAudioSource == MediaRecorder.AudioSource.VOICE_COMMUNICATION) {
-                        Log.d("EchoraCallMonitor", "Call detected via recording config: ${config.clientAudioSource}")
-                        return true
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w("EchoraCallMonitor", "Failed to get recording configs", e)
+        val voipRecording = mode == AudioManager.MODE_NORMAL && try {
+            audioManager.activeRecordingConfigurations.any {
+                !it.isClientSilenced && it.clientAudioSource == MediaRecorder.AudioSource.VOICE_COMMUNICATION
             }
+        } catch (e: SecurityException) {
+            Log.d("EchoraCallMonitor", "Configurazioni audio non accessibili", e)
+            false
         }
-
-        return false
+        val kind = detectCall(mode, voipRecording)
+        if (_call.value != kind) {
+            _call.value = kind
+            Log.d("EchoraCallMonitor", "Tipo chiamata: $kind")
+        }
     }
 }

@@ -40,22 +40,26 @@ class ShellConnection(private val context: Context) {
             scope = CoroutineScope(Dispatchers.IO)
         }
         scope.launch {
-            if (Shizuku.checkSelfPermission() != 0) {
-                updateStatus(ShellStatus.NO_PERMISSION)
+            if (!Shizuku.pingBinder()) {
+                updateStatus(ShellStatus.NOT_READY)
                 return@launch
             }
             if (Shizuku.isPreV11()) {
                 updateStatus(ShellStatus.UNSUPPORTED)
                 return@launch
             }
+            if (Shizuku.checkSelfPermission() != 0) {
+                updateStatus(ShellStatus.NO_PERMISSION)
+                return@launch
+            }
             bindService()
         }
     }
 
-    fun stop() {
+    fun stop(removeService: Boolean = true) {
         isStopped = true
         scope.cancel()
-        unbindService()
+        unbindService(removeService)
         capture = null
         binder = null
         updateStatus(ShellStatus.NOT_READY)
@@ -71,7 +75,7 @@ class ShellConnection(private val context: Context) {
         val args = Shizuku.UserServiceArgs(componentName)
             .daemon(false)
             .debuggable(true)
-            .version(1)
+            .version(6)
             .processNameSuffix("shizuku")
         currentArgs = args
 
@@ -100,11 +104,12 @@ class ShellConnection(private val context: Context) {
         Shizuku.bindUserService(args, serviceConnection!!)
     }
 
-    private fun unbindService() {
+    private fun unbindService(removeService: Boolean = false) {
         serviceConnection?.let { conn ->
             currentArgs?.let { args ->
-                Shizuku.unbindUserService(args, conn, true)
+                if (Shizuku.pingBinder()) Shizuku.unbindUserService(args, conn, removeService)
             }
+            binder?.unlinkToDeath(binderDeath, 0)
             binder = null
             serviceConnection = null
             currentArgs = null
@@ -134,7 +139,7 @@ class ShellConnection(private val context: Context) {
             withContext(Dispatchers.IO) {
                 delay(delay)
                 if (isStopped == false) {
-                    bindService()
+                    start()
                 }
             }
         }

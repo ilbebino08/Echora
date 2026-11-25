@@ -10,6 +10,7 @@ class Settings(private val prefs: SharedPreferences) {
         private const val KEY_BUFFER_MINUTES = "bufferMinutes"
         private const val KEY_LISTENING_ENABLED = "listeningEnabled"
         private const val KEY_START_ON_BOOT = "startOnBoot"
+        private const val KEY_RECORD_CALLS = "recordCalls"
 
         private const val DEFAULT_BUFFER_MINUTES = 10
         private const val MIN_BUFFER_MINUTES = 1
@@ -39,4 +40,12 @@ class Settings(private val prefs: SharedPreferences) {
         set(value) {
             prefs.edit().putBoolean(KEY_START_ON_BOOT, value).apply()
         }
+
+    var recordCalls: Boolean
+        get() = prefs.getBoolean(KEY_RECORD_CALLS, true)
+        set(value) {
+            prefs.edit().putBoolean(KEY_RECORD_CALLS, value).apply()
+        }
+
+    internal fun shouldPauseForCall(kind: CallKind): Boolean = kind != CallKind.NONE && !recordCalls
 }

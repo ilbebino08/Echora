@@ -1,104 +1,165 @@
 package com.echora.app.privileged
 
-import android.app.Service
 import android.content.Context
-import android.content.Intent
 import android.media.AudioRecord
 import android.os.Binder
-import android.os.IBinder
+import android.os.Process
 import android.util.Log
 import com.echora.app.IEchoraCapture
 import com.echora.app.IMicStateCallback
+import kotlin.system.exitProcess
 
-class EchoraShellService : Service() {
-    private var record: AudioRecord? = null
+class EchoraShellService(private val context: Context) : IEchoraCapture.Stub() {
+    @Volatile private var record: AudioRecord? = null
+    @Volatile private var voipPlayback: VoipPlayback? = null
+    private var playbackBytes = ByteArray(0)
     private val mutex = Any()
     private var micListener: IMicStateCallback? = null
 
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
+    override fun open(source: Int, sampleRate: Int, channels: Int, bufferBytes: Int) {
+        synchronized(mutex) {
+            releaseLocked()
+            val identity = Binder.clearCallingIdentity()
+            try {
+                val rec = AudioRecordFactory.create(
+                    context,
+                    source,
+                    sampleRate,
+                    channels,
+                    bufferBytes
+                )
+                try {
+                    check(rec.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord non inizializzato ($source)" }
+                    rec.startRecording()
+                    check(rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Sorgente $source non attiva" }
+                } catch (e: Exception) {
+                    rec.release()
+                    throw e
+                }
+                record = rec
+                Log.d("EchoraShell", "open OK: source=$source rate=$sampleRate ch=$channels")
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
+        }
     }
 
-    private val binder = object : IEchoraCapture.Stub() {
-        override fun open(source: Int, sampleRate: Int, channels: Int, bufferBytes: Int) {
-            synchronized(mutex) {
-                releaseLocked()
-                try {
-                    val rec = AudioRecordFactory.create(
-                        this@EchoraShellService,
-                        source,
-                        sampleRate,
-                        channels,
-                        bufferBytes
-                    )
-                    rec.startRecording()
-                    if (rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                        record = rec
-                        Log.d("EchoraShell", "open OK: source=$source rate=$sampleRate ch=$channels")
-                    } else {
+    override fun enableVoipPlayback(sampleRate: Int) {
+        synchronized(mutex) {
+            val identity = Binder.clearCallingIdentity()
+            try {
+                if (voipPlayback == null) {
+                    voipPlayback = VoipPlayback.open(ShellContext(context, Process.myUid() == 0), sampleRate)
+                    Log.d("EchoraShell", "Loopback VoIP attivo")
+                }
+            } finally {
+                Binder.restoreCallingIdentity(identity)
+            }
+        }
+    }
+
+    override fun start() {
+        synchronized(mutex) {
+            record?.startRecording()
+        }
+    }
+
+    override fun read(buffer: ByteArray, sizeBytes: Int): Int {
+        val rec = record
+        val playback = voipPlayback
+        return try {
+            if (rec == null) {
+                return playback?.let { readVoipPlayback(it, buffer, sizeBytes) } ?: -1
+            }
+            val count = rec.read(buffer, 0, sizeBytes)
+            if (count < 0 && playback != null) {
+                synchronized(mutex) {
+                    if (record === rec) {
+                        record = null
                         rec.release()
-                        Log.e("EchoraShell", "open FAILED: startRecording state=${rec.recordingState}")
+                        Log.w("EchoraShell", "Microfono interrotto ($count), continua il loopback VoIP")
                     }
-                } catch (e: Exception) {
-                    Log.e("EchoraShell", "open exception", e)
                 }
+                return readVoipPlayback(playback, buffer, sizeBytes)
             }
-        }
-
-        override fun start() {
-            synchronized(mutex) {
-                record?.startRecording()
+            if (count > 0 && playback != null) {
+                if (playbackBytes.size < count) playbackBytes = ByteArray(count)
+                val read = readVoipPlayback(playback, playbackBytes, count)
+                if (read > 0) mixVoicePcm(buffer, playbackBytes, read)
+                if (read < 0) return read
             }
+            count
+        } catch (e: Exception) {
+            Log.e("EchoraShell", "read exception", e)
+            -1
         }
+    }
 
-        override fun read(buffer: ByteArray, sizeBytes: Int): Int {
-            val rec = record ?: return -1
-            return try {
-                rec.read(buffer, 0, sizeBytes)
-            } catch (e: Exception) {
-                Log.e("EchoraShell", "read exception", e)
-                -1
-            }
+    private fun readVoipPlayback(playback: VoipPlayback, buffer: ByteArray, sizeBytes: Int): Int {
+        val count = playback.record.read(buffer, 0, sizeBytes, AudioRecord.READ_NON_BLOCKING)
+        logVoipSignal(playback, buffer, count)
+        return count
+    }
+
+    override fun release() {
+        synchronized(mutex) {
+            releaseLocked()
         }
+    }
 
-        override fun release() {
-            synchronized(mutex) {
-                releaseLocked()
-            }
-        }
-
-        override fun isMicrophoneDisabled(): Boolean {
-            return try {
-                val sensorPrivacy = getSystemService("sensor_privacy")
-                if (sensorPrivacy != null) {
-                    val method = sensorPrivacy.javaClass.getMethod("isSensorPrivacyEnabled", Int::class.java)
-                    method.isAccessible = true
-                    method.invoke(sensorPrivacy, 1) as Boolean // 1 = microphone
-                } else {
-                    false
-                }
-            } catch (e: Exception) {
-                Log.w("EchoraShell", "isMicrophoneDisabled check failed", e)
+    override fun isMicrophoneDisabled(): Boolean {
+        return try {
+            val sensorPrivacy = context.getSystemService("sensor_privacy")
+            if (sensorPrivacy != null) {
+                val method = sensorPrivacy.javaClass.getMethod("isSensorPrivacyEnabled", Int::class.java)
+                method.isAccessible = true
+                method.invoke(sensorPrivacy, 1) as Boolean // 1 = microphone
+            } else {
                 false
             }
+        } catch (e: Exception) {
+            Log.w("EchoraShell", "isMicrophoneDisabled check failed", e)
+            false
         }
+    }
 
-        override fun setMicListener(cb: IMicStateCallback?) {
-            synchronized(mutex) {
-                micListener = cb
+    override fun setMicListener(cb: IMicStateCallback?) {
+        synchronized(mutex) {
+            micListener = cb
+        }
+    }
+
+    override fun actualSampleRate(): Int {
+        return record?.sampleRate ?: 0
+    }
+
+    override fun actualChannels(): Int {
+        return record?.channelConfiguration ?: 0
+    }
+    private fun logVoipSignal(playback: VoipPlayback, bytes: ByteArray, count: Int) {
+        if (!playback.receivedSignal && (0 until count).any { bytes[it] != 0.toByte() }) {
+            playback.receivedSignal = true
+            Log.d("EchoraShell", "Segnale VoIP ricevuto dal loopback")
+        }
+    }
+
+    private fun releaseVoipPlayback() {
+        val playback = voipPlayback
+        voipPlayback = null
+        if (playback != null) {
+            val identity = Binder.clearCallingIdentity()
+            try {
+                playback.close()
+            } catch (e: Exception) {
+                Log.w("EchoraShell", "Chiusura loopback VoIP", e)
+            } finally {
+                Binder.restoreCallingIdentity(identity)
             }
-        }
-
-        override fun actualSampleRate(): Int {
-            return record?.sampleRate ?: 0
-        }
-
-        override fun actualChannels(): Int {
-            return record?.channelConfiguration ?: 0
         }
     }
 
     private fun releaseLocked() {
+        releaseVoipPlayback()
         val rec = record
         if (rec != null) {
             try {
@@ -115,11 +176,9 @@ class EchoraShellService : Service() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        synchronized(mutex) {
-            releaseLocked()
-        }
+    override fun destroy() {
+        release()
+        exitProcess(0)
     }
 
     companion object {

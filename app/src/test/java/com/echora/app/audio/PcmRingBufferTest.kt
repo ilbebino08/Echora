@@ -27,6 +27,14 @@ class PcmRingBufferTest {
         assertEquals(10L, b.filledBytes())
     }
 
+    @Test fun `short snapshots select the newest bytes before and after wraparound`() {
+        val buffer = buf(8)
+        buffer.append(byteArrayOf(1, 2, 3, 4))
+        assertArrayEquals(byteArrayOf(3, 4), buffer.readLast(2))
+        buffer.append(byteArrayOf(5, 6, 7, 8, 9))
+        assertArrayEquals(byteArrayOf(7, 8, 9), buffer.readLast(3))
+    }
+
     @Test fun `reset empties the buffer`() {
         val b = buf(10); b.append(ByteArray(10)); b.reset()
         assertEquals(0L, b.filledBytes()); assertEquals(0, b.readLast(10).size)

@@ -7,8 +7,13 @@ sealed interface CaptureState {
     object Idle : CaptureState
     object Connecting : CaptureState
     object Recording : CaptureState
+    object PausedForCall : CaptureState
     object MicDisabled : CaptureState
-    object CallRecording : CaptureState
+    data class CallRecording(
+        val kind: CallKind,
+        val hasCallAudio: Boolean,
+        val hasMicrophone: Boolean = true
+    ) : CaptureState
     data class Error(val reason: String) : CaptureState
 }
 

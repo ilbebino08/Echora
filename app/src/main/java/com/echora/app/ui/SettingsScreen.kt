@@ -1,165 +1,171 @@
 package com.echora.app.ui
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.echora.app.capture.CaptureService
 import com.echora.app.capture.Settings
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(
     settings: Settings,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val bufferMinutes = remember { mutableStateOf(settings.bufferMinutes) }
-    val listeningEnabled = remember { mutableStateOf(settings.listeningEnabled) }
-    val startOnBoot = remember { mutableStateOf(settings.startOnBoot) }
+    val context = LocalContext.current
+    var bufferMinutes by rememberSaveable { mutableStateOf(settings.bufferMinutes) }
+    var listeningEnabled by rememberSaveable { mutableStateOf(settings.listeningEnabled) }
+    var startOnBoot by rememberSaveable { mutableStateOf(settings.startOnBoot) }
+    var recordCalls by rememberSaveable { mutableStateOf(settings.recordCalls) }
+    val changed = bufferMinutes != settings.bufferMinutes ||
+        listeningEnabled != settings.listeningEnabled || startOnBoot != settings.startOnBoot ||
+        recordCalls != settings.recordCalls
+    val colors = MaterialTheme.colorScheme
+    val type = MaterialTheme.typography
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
+        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(
+            start = 22.dp, end = 22.dp, top = 12.dp, bottom = 24.dp
+        ),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Header
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier.widthIn(max = 480.dp).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            Text("Impostazioni", fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text("Configura Echora", fontSize = 16.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        // Buffer minutes slider
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow
-            )
-        ) {
-            Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("Minuti di buffer", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text("${bufferMinutes.value} min (${(bufferMinutes.value * 32000 * 60 / 1024 / 1024).toInt()} MB)", fontSize = 14.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
+            Column {
+                TextButton(onClick = onBack, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("‹  Indietro")
                 }
-                androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(8.dp))
-                Slider(
-                    value = bufferMinutes.value.toFloat(),
-                    onValueChange = { bufferMinutes.value = it.roundToInt().coerceIn(1, 60) },
-                    valueRange = 1f..60f,
-                    steps = 59,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = true
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text("1 min", fontSize = 12.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text("60 min", fontSize = 12.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                Text("Impostazioni", style = type.headlineLarge)
             }
-        }
 
-        // Listening enabled switch
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow
-            )
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp).height(56.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            Surface(
+                color = colors.surface,
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Column {
-                    Text("Ascolto attivo", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text("Avvia cattura automaticamente all'avvio app", fontSize = 12.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Switch(
-                    checked = listeningEnabled.value,
-                    onCheckedChange = { listeningEnabled.value = it },
-                    modifier = Modifier.padding(start = 16.dp)
-                )
-            }
-        }
-
-        // Start on boot switch
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.surfaceContainerLow
-            )
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp).height(56.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("Avvio al boot", fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                    Text("Avvia automaticamente il servizio all'accensione del telefono", fontSize = 12.sp, color = androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Switch(
-                    checked = startOnBoot.value,
-                    onCheckedChange = { startOnBoot.value = it },
-                    modifier = Modifier.padding(start = 16.dp)
-                )
-            }
-        }
-
-        // Save button
-        Button(
-            onClick = {
-                // Only save if changed
-                val needRestart = bufferMinutes.value != settings.bufferMinutes
-                if (needRestart) {
-                    settings.bufferMinutes = bufferMinutes.value
-                }
-                if (listeningEnabled.value != settings.listeningEnabled) {
-                    settings.listeningEnabled = listeningEnabled.value
-                }
-                if (startOnBoot.value != settings.startOnBoot) {
-                    settings.startOnBoot = startOnBoot.value
-                }
-                if (needRestart) {
-                    // Restart capture service to resize buffer
-                    CoroutineScope(Dispatchers.IO).launch {
-                        CaptureService.stop(context)
-                        if (settings.listeningEnabled) {
-                            CaptureService.start(context)
-                        }
+                Column(Modifier.padding(18.dp)) {
+                    Text("Durata del buffer", style = type.titleMedium)
+                    Text(
+                        "$bufferMinutes min",
+                        modifier = Modifier.padding(top = 4.dp),
+                        style = type.headlineSmall,
+                        color = colors.primary
+                    )
+                    Slider(
+                        value = bufferMinutes.toFloat(),
+                        onValueChange = { bufferMinutes = it.roundToInt() },
+                        valueRange = 1f..60f,
+                        modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Durata del buffer in minuti" }
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("1 min", style = type.labelSmall, color = colors.onSurfaceVariant)
+                        Text("60 min", style = type.labelSmall, color = colors.onSurfaceVariant)
                     }
                 }
-                onBack()
-            },
-            modifier = Modifier.fillMaxWidth().padding(top = 16.dp).height(56.dp),
-            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                containerColor = androidx.compose.material3.MaterialTheme.colorScheme.primary
-            )
-        ) {
-            Text("Salva", fontSize = 18.sp, fontWeight = FontWeight.Bold, color = androidx.compose.material3.MaterialTheme.colorScheme.onPrimary)
+            }
+
+            Surface(
+                color = colors.surface,
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    SettingSwitch(
+                        label = "Ascolto attivo",
+                        description = "Avvia l’ascolto quando apri Echora.",
+                        checked = listeningEnabled,
+                        onCheckedChange = { listeningEnabled = it }
+                    )
+                    HorizontalDivider(Modifier.padding(horizontal = 18.dp))
+                    SettingSwitch(
+                        label = "Avvio all’accensione",
+                        description = "Riprendi l’ascolto dopo un riavvio, se Shizuku è attivo.",
+                        checked = startOnBoot,
+                        onCheckedChange = { startOnBoot = it }
+                    )
+                    HorizontalDivider(Modifier.padding(horizontal = 18.dp))
+                    SettingSwitch(
+                        label = "Registrazione chiamate",
+                        description = "Registra telefonate e chiamate VoIP. Se disattivata, l’ascolto si sospende durante la chiamata.",
+                        checked = recordCalls,
+                        onCheckedChange = { recordCalls = it }
+                    )
+                }
+            }
+
+            Button(
+                onClick = {
+                    val resize = bufferMinutes != settings.bufferMinutes
+                    if (resize) settings.bufferMinutes = bufferMinutes
+                    if (listeningEnabled != settings.listeningEnabled) settings.listeningEnabled = listeningEnabled
+                    if (startOnBoot != settings.startOnBoot) settings.startOnBoot = startOnBoot
+                    if (recordCalls != settings.recordCalls) settings.recordCalls = recordCalls
+                    if (resize) {
+                        CaptureService.stop(context)
+                        if (settings.listeningEnabled) CaptureService.start(context)
+                    }
+                    onBack()
+                },
+                enabled = changed,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
+                shape = MaterialTheme.shapes.medium
+            ) { Text("Salva modifiche") }
         }
+    }
+}
+
+@Composable
+private fun SettingSwitch(
+    label: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(description, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = checked, onCheckedChange = null)
     }
 }
